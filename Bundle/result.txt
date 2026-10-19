@@ -1,0 +1,822 @@
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+
+// General Information about an assembly is controlled through the following
+// set of attributes. Change these attribute values to modify the information
+// associated with an assembly.
+[assembly: AssemblyTitle("Bundle")]
+[assembly: AssemblyDescription("")]
+[assembly: AssemblyConfiguration("")]
+[assembly: AssemblyCompany("")]
+[assembly: AssemblyProduct("Bundle")]
+[assembly: AssemblyCopyright("Copyright ©  2026")]
+[assembly: AssemblyTrademark("")]
+[assembly: AssemblyCulture("")]
+
+// Setting ComVisible to false makes the types in this assembly not visible
+// to COM components.  If you need to access a type in this assembly from
+// COM, set the ComVisible attribute to true on that type.
+[assembly: ComVisible(false)]
+
+// The following GUID is for the ID of the typelib if this project is exposed to COM
+[assembly: Guid("1c17b1eb-76c9-4158-bcc7-e0a6880fb7d5")]
+
+// Version information for an assembly consists of the following four values:
+//
+//      Major Version
+//      Minor Version
+//      Build Number
+//      Revision
+//
+[assembly: AssemblyVersion("1.0.0.0")]
+[assembly: AssemblyFileVersion("1.0.0.0")]
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Security;
+using System.Text;
+
+namespace Bundle
+{
+    public static class Bundler
+    {
+        private static readonly HashSet<string> ExcludedDirectories =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "bin", "obj", "debug", "release",
+                "node_modules", "packages",
+                ".git", ".vs", ".vscode", ".idea",
+                "x64", "x86", "dist", "build", "out"
+            };
+
+        public static int Run(
+            string[] languages,
+            string output,
+            bool note,
+            string sort,
+            bool removeEmptyLines,
+            string author)
+        {
+            if (languages == null)
+                return Error("רשימת השפות חסרה.");
+
+            var languageError = Languages.Validate(languages);
+
+            if (languageError != null)
+                return Error(languageError);
+
+            if (string.IsNullOrWhiteSpace(output))
+                return Error("יש לציין נתיב לקובץ הפלט.");
+
+            if (!string.Equals(
+                    sort, "file-name",
+                    StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(
+                    sort, "type",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return Error(
+                    "ערך sort חייב להיות file-name או type.");
+            }
+
+            sort = sort.ToLowerInvariant();
+
+            string outputPath;
+
+            try
+            {
+                outputPath = Path.GetFullPath(output);
+            }
+            catch (Exception ex) when (
+                ex is ArgumentException ||
+                ex is NotSupportedException ||
+                ex is PathTooLongException ||
+                ex is IOException ||
+                ex is SecurityException)
+            {
+                return Error($"נתיב הקובץ '{output}' אינו תקין.");
+            }
+
+            var outputDirectory = Path.GetDirectoryName(outputPath);
+
+            if (string.IsNullOrEmpty(outputDirectory) ||
+                !Directory.Exists(outputDirectory))
+            {
+                return Error(
+                    $"תיקיית הפלט '{outputDirectory}' אינה קיימת.");
+            }
+
+            if (Directory.Exists(outputPath))
+                return Error("נתיב הפלט מצביע על תיקייה ולא על קובץ.");
+
+            var root = Path.GetFullPath(
+                Directory.GetCurrentDirectory());
+
+            HashSet<string> extensions;
+
+            try
+            {
+                extensions =
+                    Languages.Resolve(languages) ??
+                    Languages.AllExtensions;
+            }
+            catch (ArgumentException ex)
+            {
+                return Error(ex.Message);
+            }
+
+            List<string> fileList;
+
+            try
+            {
+                fileList = CollectFiles(root)
+                    .Where(file =>
+                        extensions.Contains(Path.GetExtension(file)))
+                    .Where(file =>
+                        !string.Equals(
+                            Path.GetFullPath(file),
+                            outputPath,
+                            StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+
+                if (sort == "type")
+                {
+                    fileList = fileList
+                        .OrderBy(
+                            file => Path.GetExtension(file),
+                            StringComparer.OrdinalIgnoreCase)
+                        .ThenBy(
+                            file => Path.GetFileName(file),
+                            StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+                }
+                else
+                {
+                    fileList = fileList
+                        .OrderBy(
+                            file => Path.GetFileName(file),
+                            StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+                }
+            }
+            catch (Exception ex) when (
+                ex is IOException ||
+                ex is UnauthorizedAccessException ||
+                ex is SecurityException)
+            {
+                return Error(
+                    $"שגיאה באיסוף קובצי המקור: {ex.Message}");
+            }
+
+            if (fileList.Count == 0)
+            {
+                return Error(
+                    "לא נמצאו קובצי קוד מתאימים בתיקייה הנוכחית.");
+            }
+
+            var bundle = new StringBuilder();
+
+            if (!string.IsNullOrWhiteSpace(author))
+            {
+                bundle.AppendLine($"// Author: {author.Trim()}");
+                bundle.AppendLine();
+            }
+
+            foreach (var file in fileList)
+            {
+                string[] lines;
+
+                try
+                {
+                    lines = File.ReadAllLines(file);
+                }
+                catch (Exception ex) when (
+                    ex is IOException ||
+                    ex is UnauthorizedAccessException ||
+                    ex is SecurityException)
+                {
+                    return Error(
+                        $"לא ניתן לקרוא את קובץ המקור '{file}': {ex.Message}");
+                }
+
+                if (note)
+                {
+                    string relativePath = GetRelativePath(root, file);
+
+                    bundle.AppendLine(
+                        $"// Source: {relativePath}");
+                }
+
+                foreach (var line in lines)
+                {
+                    if (removeEmptyLines &&
+                        string.IsNullOrWhiteSpace(line))
+                    {
+                        continue;
+                    }
+
+                    bundle.AppendLine(line);
+                }
+
+                bundle.AppendLine();
+            }
+
+            try
+            {
+                File.WriteAllText(
+                    outputPath,
+                    bundle.ToString(),
+                    new UTF8Encoding(
+                        encoderShouldEmitUTF8Identifier: false));
+            }
+            catch (Exception ex) when (
+                ex is IOException ||
+                ex is UnauthorizedAccessException ||
+                ex is SecurityException)
+            {
+                return Error(
+                    $"שמירת קובץ הפלט נכשלה: {ex.Message}");
+            }
+
+            Console.WriteLine(
+                $"נארזו {fileList.Count} קבצים לתוך {outputPath}");
+
+            return 0;
+        }
+
+        private static string GetRelativePath(
+            string root,
+            string file)
+        {
+            string fullRoot = Path.GetFullPath(root)
+                .TrimEnd(
+                    Path.DirectorySeparatorChar,
+                    Path.AltDirectorySeparatorChar);
+
+            string fullFile = Path.GetFullPath(file);
+
+            string rootWithSeparator =
+                fullRoot + Path.DirectorySeparatorChar;
+
+            if (fullFile.StartsWith(
+                rootWithSeparator,
+                StringComparison.OrdinalIgnoreCase))
+            {
+                return fullFile.Substring(rootWithSeparator.Length);
+            }
+
+            return fullFile;
+        }
+
+        private static List<string> CollectFiles(string root)
+        {
+            var result = new List<string>();
+
+            CollectFilesRecursive(root, result);
+
+            return result;
+        }
+
+        private static void CollectFilesRecursive(
+            string directory,
+            List<string> result)
+        {
+            string[] files;
+            string[] subDirectories;
+
+            try
+            {
+                files = Directory.GetFiles(directory);
+                subDirectories = Directory.GetDirectories(directory);
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return;
+            }
+            catch (IOException)
+            {
+                return;
+            }
+            catch (SecurityException)
+            {
+                return;
+            }
+
+            result.AddRange(files);
+
+            foreach (var subDirectory in subDirectories)
+            {
+                var directoryInfo = new DirectoryInfo(subDirectory);
+
+                if (ExcludedDirectories.Contains(directoryInfo.Name))
+                    continue;
+
+                try
+                {
+                    if ((directoryInfo.Attributes &
+                         FileAttributes.ReparsePoint) != 0)
+                    {
+                        continue;
+                    }
+                }
+                catch (Exception ex) when (
+                    ex is IOException ||
+                    ex is UnauthorizedAccessException ||
+                    ex is SecurityException)
+                {
+                    continue;
+                }
+
+                CollectFilesRecursive(subDirectory, result);
+            }
+        }
+
+        private static int Error(string message)
+        {
+            Console.Error.WriteLine($"שגיאה: {message}");
+
+            return 1;
+        }
+    }
+}
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace Bundle
+{
+    public static class Languages
+    {
+        public const string All = "all";
+
+        public static readonly Dictionary<string, string[]> Extensions =
+            new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "csharp", new[] { ".cs" } },
+                { "cs", new[] { ".cs" } },
+                { "java", new[] { ".java" } },
+                { "python", new[] { ".py" } },
+                { "py", new[] { ".py" } },
+                { "javascript", new[] { ".js", ".jsx" } },
+                { "js", new[] { ".js", ".jsx" } },
+                { "typescript", new[] { ".ts", ".tsx" } },
+                { "ts", new[] { ".ts", ".tsx" } },
+                { "html", new[] { ".html", ".htm" } },
+                { "css", new[] { ".css", ".scss", ".sass", ".less" } },
+                { "c", new[] { ".c", ".h" } },
+                { "cpp", new[] { ".cpp", ".cc", ".cxx", ".hpp", ".h" } },
+                { "sql", new[] { ".sql" } },
+                { "go", new[] { ".go" } },
+                { "kotlin", new[] { ".kt", ".kts" } },
+                { "php", new[] { ".php" } },
+                { "ruby", new[] { ".rb" } },
+                { "swift", new[] { ".swift" } },
+                { "rust", new[] { ".rs" } }
+            };
+
+        public static IEnumerable<string> Names
+        {
+            get
+            {
+                return Extensions.Keys
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(
+                        name => name,
+                        StringComparer.OrdinalIgnoreCase);
+            }
+        }
+
+        public static HashSet<string> AllExtensions
+        {
+            get
+            {
+                return new HashSet<string>(
+                    Extensions.Values.SelectMany(
+                        extensions => extensions),
+                    StringComparer.OrdinalIgnoreCase);
+            }
+        }
+
+        public static HashSet<string> Resolve(
+            IEnumerable<string> languages)
+        {
+            if (languages == null)
+                throw new ArgumentNullException(nameof(languages));
+
+            var list = languages
+                .Where(language =>
+                    !string.IsNullOrWhiteSpace(language))
+                .Select(language => language.Trim())
+                .ToList();
+
+            var error = Validate(list);
+
+            if (error != null)
+                throw new ArgumentException(
+                    error,
+                    nameof(languages));
+
+            if (list.Any(language =>
+                language.Equals(
+                    All,
+                    StringComparison.OrdinalIgnoreCase)))
+            {
+                return null;
+            }
+
+            return new HashSet<string>(
+                list.SelectMany(language => Extensions[language]),
+                StringComparer.OrdinalIgnoreCase);
+        }
+
+        public static string Validate(
+            IReadOnlyCollection<string> languages)
+        {
+            if (languages == null)
+                return "רשימת השפות חסרה.";
+
+            if (languages.Count == 0)
+                return "יש לציין לפחות שפה אחת, או all.";
+
+            if (languages.Any(string.IsNullOrWhiteSpace))
+                return "שם שפה אינו יכול להיות ריק.";
+
+            var hasAll = languages.Any(language =>
+                language.Equals(
+                    All,
+                    StringComparison.OrdinalIgnoreCase));
+
+            if (hasAll && languages.Count > 1)
+                return "לא ניתן לשלב את all עם שפות נוספות.";
+
+            var unknown = languages
+                .Where(language =>
+                    !language.Equals(
+                        All,
+                        StringComparison.OrdinalIgnoreCase)
+                    && !Extensions.ContainsKey(language))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (unknown.Count > 0)
+            {
+                return
+                    $"שפה לא מוכרת: {string.Join(", ", unknown)}. " +
+                    $"שפות נתמכות: all, {string.Join(", ", Names)}";
+            }
+
+            return null;
+        }
+    }
+}
+
+using System;
+using System.CommandLine;
+using System.Linq;
+using System.Text;
+
+namespace Bundle
+{
+    public class Program
+    {
+        static int Main(string[] args)
+        {
+            Console.OutputEncoding = Encoding.UTF8;
+
+            var rootCommand = new RootCommand(
+                "Bundle - אריזת קובצי קוד");
+
+            var languageOption = new Option<string[]>(
+                "--language", "-l")
+            {
+                Description = "שפות הקוד לאריזה או all",
+                Required = true,
+                AllowMultipleArgumentsPerToken = true
+            };
+
+            languageOption.Validators.Add(result =>
+            {
+                var values = result.Tokens
+                    .Select(token => token.Value)
+                    .ToList();
+
+                var error = Languages.Validate(values);
+
+                if (error != null)
+                    result.AddError(error);
+            });
+
+            var outputOption = new Option<string>(
+                "--output", "-o")
+            {
+                Description = "נתיב קובץ ה-bundle",
+                Required = true
+            };
+
+            var noteOption = new Option<bool>(
+                "--note", "-n")
+            {
+                Description = "הוספת נתיב מקור כהערה"
+            };
+
+            var sortOption = new Option<string>(
+                "--sort", "-s")
+            {
+                Description = "מיון: file-name או type",
+                DefaultValueFactory = _ => "file-name"
+            };
+
+            sortOption.AcceptOnlyFromAmong(
+                "file-name", "type");
+
+            var removeEmptyLinesOption = new Option<bool>(
+                "--remove-empty-lines", "-r")
+            {
+                Description = "הסרת שורות ריקות"
+            };
+
+            var authorOption = new Option<string>(
+                "--author", "-a")
+            {
+                Description = "שם יוצר הקובץ"
+            };
+
+            var bundleCommand = new Command(
+                "bundle", "אריזת קובצי קוד");
+
+            bundleCommand.Options.Add(languageOption);
+            bundleCommand.Options.Add(outputOption);
+            bundleCommand.Options.Add(noteOption);
+            bundleCommand.Options.Add(sortOption);
+            bundleCommand.Options.Add(removeEmptyLinesOption);
+            bundleCommand.Options.Add(authorOption);
+
+            bundleCommand.SetAction(parseResult =>
+                Bundler.Run(
+                    parseResult.GetValue(languageOption),
+                    parseResult.GetValue(outputOption),
+                    parseResult.GetValue(noteOption),
+                    parseResult.GetValue(sortOption),
+                    parseResult.GetValue(removeEmptyLinesOption),
+                    parseResult.GetValue(authorOption)));
+
+            var createRspCommand = new Command(
+                "create-rsp",
+                "יצירת קובץ תגובה עם פקודת bundle מוכנה");
+
+            createRspCommand.SetAction(
+                _ => ResponseFileCreator.Run());
+
+            rootCommand.Subcommands.Add(bundleCommand);
+            rootCommand.Subcommands.Add(createRspCommand);
+
+            return rootCommand.Parse(args).Invoke();
+        }
+    }
+}
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using System.Security;
+using System.Text;
+
+namespace Bundle
+{
+    public static class ResponseFileCreator
+    {
+        public static int Run()
+        {
+            var languages = Ask(
+                "אילו שפות לארוז? הפרידי ברווח או בפסיק, או הקלידי all.\n" +
+                "שפות נתמכות: " + string.Join(", ", Languages.Names),
+                input => Languages.Validate(SplitWords(input)));
+
+            var output = Ask(
+                "מה שם קובץ ה-bundle? אפשר לציין שם או נתיב מלא.",
+                input =>
+                {
+                    if (string.IsNullOrWhiteSpace(input))
+                        return "יש להזין שם קובץ.";
+
+                    try
+                    {
+                        Path.GetFullPath(input);
+                        return null;
+                    }
+                    catch (Exception ex) when (
+                        ex is ArgumentException ||
+                        ex is NotSupportedException ||
+                        ex is PathTooLongException ||
+                        ex is IOException ||
+                        ex is SecurityException)
+                    {
+                        return "יש להזין נתיב קובץ תקין.";
+                    }
+                });
+
+            var note = AskYesNo(
+                "לרשום את מקור הקוד כהערה? (y/n)");
+
+            var sort = Ask(
+                "סדר מיון: file-name או type? (Enter = file-name)",
+                input =>
+                    input == "" ||
+                    input.Equals(
+                        "file-name",
+                        StringComparison.OrdinalIgnoreCase) ||
+                    input.Equals(
+                        "type",
+                        StringComparison.OrdinalIgnoreCase)
+                        ? null
+                        : "יש להזין file-name או type.");
+
+            if (sort == "")
+                sort = "file-name";
+
+            sort = sort.ToLowerInvariant();
+
+            var removeEmptyLines = AskYesNo(
+                "למחוק שורות ריקות? (y/n)");
+
+            var author = Ask(
+                "שם יוצר הקובץ? (Enter לדילוג)",
+                input => null);
+
+            var rspName = Ask(
+                "שם קובץ התגובה? (Enter = bundle.rsp)",
+                input =>
+                {
+                    if (string.IsNullOrWhiteSpace(input))
+                        return null;
+
+                    if (input.IndexOfAny(
+                        Path.GetInvalidFileNameChars()) >= 0 ||
+                        input.Contains(
+                            Path.DirectorySeparatorChar.ToString()) ||
+                        input.Contains(
+                            Path.AltDirectorySeparatorChar.ToString()))
+                    {
+                        return "יש להזין שם קובץ בלבד, ללא נתיב.";
+                    }
+
+                    return null;
+                });
+
+            if (rspName == "")
+                rspName = "bundle.rsp";
+
+            if (!rspName.EndsWith(
+                ".rsp",
+                StringComparison.OrdinalIgnoreCase))
+            {
+                rspName += ".rsp";
+            }
+
+            string assemblyPath;
+
+            try
+            {
+                var entryAssembly = Assembly.GetEntryAssembly();
+
+                assemblyPath = entryAssembly == null
+                    ? ""
+                    : entryAssembly.Location;
+
+                if (string.IsNullOrWhiteSpace(assemblyPath) ||
+                    !File.Exists(assemblyPath))
+                {
+                    Console.Error.WriteLine(
+                        "שגיאה: לא ניתן לזהות את קובץ ה-DLL של התוכנית.");
+                    return 1;
+                }
+
+                assemblyPath = Path.GetFullPath(assemblyPath);
+            }
+            catch (Exception ex) when (
+                ex is IOException ||
+                ex is UnauthorizedAccessException ||
+                ex is SecurityException ||
+                ex is NotSupportedException)
+            {
+                Console.Error.WriteLine(
+                    "שגיאה בזיהוי קובץ התוכנית: " + ex.Message);
+                return 1;
+            }
+
+            var lines = new List<string>
+            {
+                Quote(assemblyPath),
+                "bundle",
+                "--language"
+            };
+
+            lines.AddRange(
+                SplitWords(languages).Select(Quote));
+
+            lines.Add("--output");
+            lines.Add(Quote(output));
+
+            lines.Add("--sort");
+            lines.Add(sort);
+
+            if (note)
+                lines.Add("--note");
+
+            if (removeEmptyLines)
+                lines.Add("--remove-empty-lines");
+
+            if (author.Length > 0)
+            {
+                lines.Add("--author");
+                lines.Add(Quote(author));
+            }
+
+            try
+            {
+                File.WriteAllLines(
+                    rspName,
+                    lines,
+                    new UTF8Encoding(false));
+            }
+            catch (Exception ex) when (
+                ex is IOException ||
+                ex is UnauthorizedAccessException ||
+                ex is SecurityException ||
+                ex is ArgumentException ||
+                ex is NotSupportedException)
+            {
+                Console.Error.WriteLine(
+                    "שגיאה בשמירת קובץ התגובה: " + ex.Message);
+                return 1;
+            }
+
+            Console.WriteLine(
+                "קובץ התגובה נוצר: " +
+                Path.GetFullPath(rspName));
+
+            Console.WriteLine(
+                "להרצה: dotnet @" + rspName);
+
+            return 0;
+        }
+
+        private static string Ask(
+            string question,
+            Func<string, string> validate)
+        {
+            while (true)
+            {
+                Console.WriteLine(question);
+
+                var input = (Console.ReadLine() ?? "").Trim();
+                var error = validate(input);
+
+                if (error == null)
+                    return input;
+
+                Console.WriteLine(
+                    "קלט לא תקין: " + error);
+            }
+        }
+
+        private static bool AskYesNo(string question)
+        {
+            var answer = Ask(
+                question,
+                input =>
+                    input.Equals(
+                        "y",
+                        StringComparison.OrdinalIgnoreCase) ||
+                    input.Equals(
+                        "n",
+                        StringComparison.OrdinalIgnoreCase)
+                        ? null
+                        : "יש להזין y או n.");
+
+            return answer.Equals(
+                "y",
+                StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static List<string> SplitWords(string input)
+        {
+            return input.Split(
+                new[] { ' ', ',' },
+                StringSplitOptions.RemoveEmptyEntries)
+                .ToList();
+        }
+
+        private static string Quote(string value)
+        {
+            return "\"" + value.Replace("\"", "\\\"") + "\"";
+        }
+    }
+}
+
